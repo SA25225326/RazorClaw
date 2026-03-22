@@ -151,12 +151,13 @@ def create_bash_safety_hook(
         if ctx.tool_name != "bash":
             return HookResult(proceed=True)
 
-        cmd = ctx.arguments.get("cmd", "")
-        if not isinstance(cmd, str):
+        # 注意：BashTool 使用的参数名是 "command"，不是 "cmd"
+        command = ctx.arguments.get("command", "")
+        if not isinstance(command, str):
             return HookResult(proceed=True)
 
         for blocked in blocked_commands:
-            if blocked in cmd:
+            if blocked in command:
                 return HookResult(
                     proceed=False,
                     reason=f"安全拦截：命令包含危险操作 '{blocked}'",
