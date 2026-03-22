@@ -47,3 +47,6 @@ logs/
 
 # uv lock (可选，如果想锁定版本可以取消注释)
 # uv.lock
+
+# 学习笔记（不上传 GitHub）
+NOTES.md
