@@ -87,9 +87,14 @@ PoiClaw/
 
 ### 扩展模块
 
-- ✅ **BaseExtension** - 抽象基类（类似 Java Interface）
+- ✅ **BaseExtension** - 抽象基类（类似 Java Interface），支持 4 种扩展能力
 - ✅ **SandboxExtension** - 安全沙箱，正则匹配拦截 rm -rf、wget、curl 等高危命令
-- ✅ **AOP 设计** - 在工具执行前进行拦截，支持责任链模式
+- ✅ **ExtensionManager** - 扩展管理器，统一管理注册、事件分发、钩子链
+- ✅ **4 种扩展能力**：
+  - `get_hook()` - 拦截工具调用（AOP 切面）
+  - `get_tools()` - 注册新工具给 LLM
+  - `get_commands()` - 注册斜杠命令（如 /diff、/files）
+  - `get_event_handlers()` - 订阅 Agent 事件（agent_start、tool_call 等）
 
 ## 快速开始
 
@@ -214,7 +219,13 @@ tools.register(EchoTool())
 #### 自定义扩展
 
 ```python
-from poiclaw.extensions import BaseExtension
+from poiclaw.extensions import (
+    BaseExtension,
+    ExtensionCommand,
+    ExtensionContext,
+    ExtensionManager,
+    ToolCallEvent,
+)
 from poiclaw.core import HookContext, HookResult
 
 class MyExtension(BaseExtension):
@@ -226,9 +237,9 @@ class MyExtension(BaseExtension):
     def description(self) -> str:
         return "我的自定义扩展"
 
+    # 1. 拦截工具调用
     def get_hook(self):
         async def my_hook(ctx: HookContext) -> HookResult:
-            # 你的拦截逻辑
             if ctx.tool_name == "bash":
                 command = ctx.arguments.get("command", "")
                 if "dangerous" in command:
@@ -239,9 +250,41 @@ class MyExtension(BaseExtension):
             return HookResult(proceed=True)
         return my_hook
 
-# 使用自定义扩展
-my_ext = MyExtension()
-hooks.add_before_execute(my_ext.get_hook())
+    # 2. 注册斜杠命令
+    def get_commands(self):
+        return {
+            "hello": ExtensionCommand(
+                name="hello",
+                description="打招呼",
+                handler=self._handle_hello,
+            )
+        }
+
+    async def _handle_hello(self, args: list[str], ctx: ExtensionContext):
+        print(f"Hello! Args: {args}")
+
+    # 3. 订阅事件
+    def get_event_handlers(self):
+        return {
+            "agent_start": [self._on_agent_start],
+            "tool_call": [self._on_tool_call],
+        }
+
+    async def _on_agent_start(self, event, ctx):
+        print(f"Agent started: {event.user_input}")
+
+    async def _on_tool_call(self, event: ToolCallEvent, ctx):
+        print(f"Tool called: {event.tool_name}")
+
+# 使用 ExtensionManager 管理
+manager = ExtensionManager()
+manager.register(MyExtension())
+
+# 获取所有钩子，注册到 Agent
+for ext in manager.get_all_extensions():
+    hook = ext.get_hook()
+    if hook:
+        hooks.add_before_execute(hook)
 ```
 
 ## 内置工具说明

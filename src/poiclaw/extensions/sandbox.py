@@ -5,10 +5,10 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from .base import BaseExtension
+from .base import BaseExtension, ExtensionContext, HookFunction
 
 if TYPE_CHECKING:
-    from poiclaw.core import HookContext, HookResult
+    pass
 
 
 class SandboxExtension(BaseExtension):
@@ -17,15 +17,18 @@ class SandboxExtension(BaseExtension):
 
     使用正则表达式检查 bash 工具的 command 参数，
     一旦发现 rm -rf、wget、curl 等高危敏感词，直接阻断执行，
-    并向 LLM 返回详细的拦截消息，高详细的报错提示能帮助 LLM 在
+    并向 LLM 返回详细的拦截消息，详细的报错提示能帮助 LLM 在
     ReAct 循环中进行更好的自我纠错。
 
     用法：
-        from poiclaw.extensions import SandboxExtension
-        from poiclaw.core import HookManager
+        from poiclaw.extensions import SandboxExtension, ExtensionManager
 
+        # 方式1：使用 ExtensionManager
+        manager = ExtensionManager()
+        manager.register(SandboxExtension())
+
+        # 方式2：只使用钩子
         sandbox = SandboxExtension()
-        hooks = HookManager()
         hooks.add_before_execute(sandbox.get_hook())
 
     自定义危险模式：
@@ -87,7 +90,11 @@ class SandboxExtension(BaseExtension):
     def description(self) -> str:
         return "安全沙箱：使用正则表达式拦截 rm -rf、wget、curl 等高危命令"
 
-    def get_hook(self):
+    @property
+    def version(self) -> str:
+        return "1.0.0"
+
+    def get_hook(self) -> HookFunction:
         """
         返回安全沙箱钩子函数。
 
@@ -97,9 +104,9 @@ class SandboxExtension(BaseExtension):
         compiled_patterns = self._compiled_patterns
         custom_message = self._custom_message
 
-        async def sandbox_hook(ctx: "HookContext") -> "HookResult":
+        async def sandbox_hook(ctx) -> "HookResult":
             # 导入放在函数内部避免循环导入
-            from poiclaw.core import HookResult
+            from .manager import HookResult
 
             # 只检查 bash 工具
             if ctx.tool_name != "bash":
@@ -135,3 +142,7 @@ class SandboxExtension(BaseExtension):
             return HookResult(proceed=True)
 
         return sandbox_hook
+
+    async def on_register(self, ctx: ExtensionContext) -> None:
+        """注册时打印日志"""
+        print(f"[SandboxExtension] 已注册，共 {len(self._patterns)} 个危险模式")
