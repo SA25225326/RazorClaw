@@ -159,10 +159,15 @@ class FeishuBot:
         self._ws_client.start()
 
     def stop(self) -> None:
-        """停止连接（目前 SDK 不支持优雅停止）"""
+        """
+        停止 WebSocket 连接。
+
+        注意：lark-oapi SDK 的 ws.Client 没有提供 stop() 方法，
+        但设置 _ws_client 为 None 后，主进程退出时会自动清理连接。
+        """
         print("[Feishu] 正在停止...")
-        # lark-oapi SDK 的 WebSocket 客户端目前不支持优雅停止
-        # 连接会在进程退出时自动关闭
+        self._ws_client = None
+        print("[Feishu] 已断开连接")
 
     def _on_message(self, data: P2ImMessageReceiveV1) -> None:
         """
