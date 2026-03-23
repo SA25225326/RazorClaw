@@ -335,6 +335,279 @@ hooks = HookManager()
 hooks.add_before_execute(bash_safety_hook)
 ```
 
+#### 2.5 事件系统 (events.py) ⭐ 新增
+
+**一句话解释**：让 Agent "告诉"外面它正在干啥。
+
+**为什么需要事件系统？**
+
+想象一下：
+- 你想在 Agent 运行时记录日志
+- 你想在工具调用时发通知
+- 你想在 Agent 结束后统计耗时
+- 你想做 Web UI，需要实时显示 Agent 的执行进度
+
+**没有事件系统**：
+```
+你：想知道 Agent 调用了哪些工具
+代码：我只能把日志写在 Agent 内部
+你：但是我想在外面用这些数据
+代码：那没办法，你得改 Agent 代码
+```
+
+**有事件系统**：
+```
+你：想知道 Agent 调用了哪些工具
+Agent：我调工具时会发射 tool_call_start 事件
+你：我订阅这个事件，记录日志
+Agent：我还会发射 tool_call_end、turn_start、agent_end 等事件
+你：在外面就能监听 Agent 的所有活动，不用改代码
+```
+
+**核心类**：
+
+```python
+# EventType - 事件类型枚举
+class EventType(str, Enum):
+    # Agent 生命周期
+    AGENT_START = "agent_start"    # Agent 开始运行
+    AGENT_END = "agent_end"        # Agent 运行结束
+
+    # Turn 生命周期（一个 LLM 调用 + 工具执行回合）
+    TURN_START = "turn_start"      # 新回合开始
+    TURN_END = "turn_end"          # 回合结束
+
+    # 消息相关
+    MESSAGE_UPDATE = "message_update"  # 新消息添加到上下文
+
+    # 工具调用相关
+    TOOL_CALL_START = "tool_call_start"    # 工具调用开始
+    TOOL_CALL_END = "tool_call_end"        # 工具调用结束
+    TOOL_CALL_ERROR = "tool_call_error"    # 工具调用错误
+
+    # 上下文相关
+    CONTEXT_COMPACT = "context_compact"    # 上下文压缩
+
+    # 错误相关
+    ERROR = "error"                        # Agent 运行错误
+
+# EventEmitter - 事件发射器
+class EventEmitter:
+    def on(self, event_type: EventType):
+        """装饰器方式订阅事件"""
+
+    def add_handler(self, event_type: EventType, handler):
+        """添加事件处理器"""
+
+    def remove_handler(self, event_type: EventType, handler):
+        """移除事件处理器"""
+
+    async def emit(self, event):
+        """发射事件，通知所有订阅者"""
+```
+
+**事件数据类**：
+
+```python
+# AgentStartEvent - Agent 开始事件
+@dataclass
+class AgentStartEvent:
+    agent_id: str | None       # Agent 标识
+    user_input: str | None     # 用户输入
+    config: AgentConfig | None # Agent 配置
+
+# AgentEndEvent - Agent 结束事件
+@dataclass
+class AgentEndEvent:
+    agent_id: str | None       # Agent 标识
+    final_response: str | None # 最终回复
+    state: AgentState | None   # 最终状态
+    error: str | None          # 错误信息（如果有）
+
+# TurnStartEvent - 回合开始事件
+@dataclass
+class TurnStartEvent:
+    agent_id: str | None
+    turn_number: int           # 回合编号
+
+# TurnEndEvent - 回合结束事件
+@dataclass
+class TurnEndEvent:
+    agent_id: str | None
+    turn_number: int
+    llm_response: str | None   # LLM 回复内容
+    tool_calls_made: int       # 本回合执行的工具调用数
+
+# ToolCallStartEvent - 工具调用开始事件
+@dataclass
+class ToolCallStartEvent:
+    agent_id: str | None
+    turn_number: int
+    tool_name: str             # 工具名称
+    tool_arguments: dict       # 工具参数
+
+# ToolCallEndEvent - 工具调用结束事件
+@dataclass
+class ToolCallEndEvent:
+    agent_id: str | None
+    turn_number: int
+    tool_name: str
+    success: bool              # 是否成功
+    result_preview: str | None # 结果预览
+    duration_ms: int | None    # 执行耗时（毫秒）
+
+# ToolCallErrorEvent - 工具调用错误事件
+@dataclass
+class ToolCallErrorEvent:
+    agent_id: str | None
+    turn_number: int
+    tool_name: str
+    error_type: str | None     # 错误类型
+    error_message: str | None  # 错误消息
+```
+
+#### 2.6 怎么订阅事件？
+
+**方式 1：装饰器**
+
+```python
+from poiclaw.core import Agent, EventEmitter, EventType
+
+agent = Agent(...)
+
+# 订阅 Agent 开始事件
+@agent.event_emitter.on(EventType.AGENT_START)
+async def on_agent_start(event):
+    print(f"Agent 开始了！用户输入：{event.user_input}")
+
+# 订阅工具调用事件
+@agent.event_emitter.on(EventType.TOOL_CALL_START)
+async def on_tool_call(event):
+    print(f"工具调用：{event.tool_name}，参数：{event.tool_arguments}")
+```
+
+**方式 2：函数式**
+
+```python
+async def on_turn_end(event):
+    print(f"回合 {event.turn_number} 结束，调用了 {event.tool_calls_made} 个工具")
+
+agent.event_emitter.add_handler(EventType.TURN_END, on_turn_end)
+```
+
+#### 2.7 Agent 集成事件
+
+Agent 在执行过程中会自动发射事件：
+
+```python
+async def run(self, user_input: str) -> str:
+    # 1. 发射 AGENT_START 事件
+    await self.event_emitter.emit(AgentStartEvent(...))
+
+    try:
+        # ... ReAct 循环 ...
+
+        while self.state.step < self.config.max_steps:
+            # 2. 发射 TURN_START 事件
+            await self.event_emitter.emit(TurnStartEvent(...))
+
+            # ... 调用 LLM ...
+
+            # 3. 发射 MESSAGE_UPDATE 事件
+            await self.event_emitter.emit(MessageUpdateEvent(...))
+
+            # ... 执行工具 ...
+
+            for tool_call in response.tool_calls:
+                # 4. 发射 TOOL_CALL_START 事件
+                await self.event_emitter.emit(ToolCallStartEvent(...))
+
+                result = await self._execute_tool(tool_call)
+
+                # 5. 发射 TOOL_CALL_END 事件
+                await self.event_emitter.emit(ToolCallEndEvent(...))
+
+            # 6. 发射 TURN_END 事件
+            await self.event_emitter.emit(TurnEndEvent(...))
+
+    finally:
+        # 7. 发射 AGENT_END 事件
+        await self.event_emitter.emit(AgentEndEvent(...))
+```
+
+#### 2.8 事件系统设计亮点
+
+**1. 解耦**
+- Agent 不关心谁在监听
+- 监听者不关心 Agent 内部实现
+- 通过事件松耦合
+
+**2. 并发执行**
+- 多个处理器并发执行
+- 不阻塞主流程
+- 用 `asyncio.gather(return_exceptions=True)` 保证异常不影响主流程
+
+**3. 灵活订阅**
+- 装饰器订阅（代码简洁）
+- 函数式订阅（动态添加/移除）
+- 可以订阅部分事件，不感兴趣的不订阅
+
+**4. 完整的事件流**
+```
+agent_start
+  ├─ turn_start
+  │   ├─ message_update (user)
+  │   ├─ message_update (assistant)
+  │   ├─ tool_call_start (bash)
+  │   ├─ tool_call_end (bash)
+  │   ├─ message_update (tool_result)
+  │   └─ turn_end
+  ├─ turn_start
+  │   └─ ...
+  └─ agent_end
+```
+
+#### 2.9 实际应用场景
+
+**场景 1：日志记录**
+
+```python
+@agent.event_emitter.on(EventType.TOOL_CALL_START)
+async def log_tool_call(event):
+    logger.info(f"工具调用: {event.tool_name} with {event.tool_arguments}")
+
+@agent.event_emitter.on(EventType.TOOL_CALL_END)
+async def log_tool_result(event):
+    logger.info(f"工具结果: {event.tool_name} -> {event.success}")
+```
+
+**场景 2：性能监控**
+
+```python
+tool_durations = {}
+
+@agent.event_emitter.on(EventType.TOOL_CALL_END)
+async def track_duration(event):
+    tool_name = event.tool_name
+    duration = event.duration_ms
+    if tool_name not in tool_durations:
+        tool_durations[tool_name] = []
+    tool_durations[tool_name].append(duration)
+```
+
+**场景 3：Web UI 实时更新**
+
+```python
+# WebSocket 推送事件给前端
+@agent.event_emitter.on(EventType.MESSAGE_UPDATE)
+async def send_to_frontend(event):
+    await websocket.send_json({
+        "type": "message_update",
+        "role": event.role,
+        "content": event.content_preview,
+    })
+```
+
 ---
 
 ### 模块 3：内置工具 (src/poiclaw/tools/)

@@ -6,11 +6,28 @@ PoiClaw Agent 核心模块。
 - BaseTool: 工具基类
 - ToolRegistry: 工具注册器
 - HookManager: 安全拦截钩子管理器
+- EventEmitter: 事件发射器
 - FileSessionManager: 会话持久化管理器
 - CompactionManager: 上下文压缩管理器
 """
 
 from .agent import Agent, AgentConfig, AgentState
+from .events import (
+    AgentEndEvent,
+    AgentStartEvent,
+    ContextCompactEvent,
+    ErrorEvent,
+    EventHandler,
+    EventType,
+    MessageUpdateEvent,
+    ToolCallEndEvent,
+    ToolCallErrorEvent,
+    ToolCallStartEvent,
+    TurnEndEvent,
+    TurnStartEvent,
+    EventEmitter,
+    create_event_summary,
+)
 from .compaction import (
     CompactionResult,
     compact,
@@ -69,4 +86,19 @@ __all__ = [
     "generate_summary",
     "serialize_messages_for_summary",
     "should_compact",
+    # Events
+    "EventType",
+    "EventEmitter",
+    "EventHandler",
+    "AgentStartEvent",
+    "AgentEndEvent",
+    "TurnStartEvent",
+    "TurnEndEvent",
+    "MessageUpdateEvent",
+    "ToolCallStartEvent",
+    "ToolCallEndEvent",
+    "ToolCallErrorEvent",
+    "ContextCompactEvent",
+    "ErrorEvent",
+    "create_event_summary",
 ]

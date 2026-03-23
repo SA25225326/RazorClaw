@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from poiclaw.llm import LLMClient, Message, ToolCall
 
-from .compaction import CompactionSettings, compact, get_latest_summary, should_compact
+from .compaction import CompactionSettings, compact, should_compact
+from .events import (
+    AgentEndEvent,
+    AgentStartEvent,
+    ContextCompactEvent,
+    ErrorEvent,
+    MessageUpdateEvent,
+    ToolCallEndEvent,
+    ToolCallErrorEvent,
+    ToolCallStartEvent,
+    TurnEndEvent,
+    TurnStartEvent,
+    EventEmitter,
+)
 from .hooks import HookContext, HookManager, HookResult
 from .session import CompactionEntry, FileSessionManager, UsageStats
 from .tools import BaseTool, ToolRegistry, ToolResult
@@ -59,6 +73,10 @@ class Agent:
         - 内存保护：只在 messages 为空时加载历史
         - 标题保护：保存时 title=None 保留原标题
 
+    事件系统：
+        - 通过 event_emitter 订阅和发射事件
+        - 支持完整的 Agent 生命周期事件
+
     用法：
         # 基础用法（无会话持久化）
         agent = Agent(
@@ -68,16 +86,10 @@ class Agent:
             config=AgentConfig(max_steps=10),
         )
 
-        # 带会话持久化
-        session_manager = FileSessionManager()
-        session_id = session_manager.generate_id()
-
-        agent = Agent(
-            llm_client=LLMClient(...),
-            tools=ToolRegistry(),
-            session_manager=session_manager,
-            session_id=session_id,
-        )
+        # 订阅事件
+        @agent.event_emitter.on(EventType.AGENT_START)
+        async def on_start(event: AgentStartEvent):
+            print(f"Agent started: {event.user_input}")
 
         # 运行
         response = await agent.run("帮我列出当前目录的文件")
@@ -94,6 +106,8 @@ class Agent:
         session_id: str | None = None,
         # ===== 压缩配置 =====
         compaction_settings: CompactionSettings | None = None,
+        # ===== 事件系统 =====
+        event_emitter: EventEmitter | None = None,
     ) -> None:
         self.llm = llm_client
         self.tools = tools or ToolRegistry()
@@ -112,6 +126,9 @@ class Agent:
         self.compaction_settings = compaction_settings or CompactionSettings()
         self._compactions: list[CompactionEntry] = []  # 压缩历史
         self._last_summary: str | None = None  # 最新摘要缓存
+
+        # ===== 事件系统 =====
+        self.event_emitter = event_emitter or EventEmitter()
 
     def add_message(self, message: Message) -> None:
         """添加消息到历史"""
@@ -142,66 +159,147 @@ class Agent:
         Returns:
             str: Agent 的最终回复
         """
-        # ===== 内存保护：只在 messages 为空且未加载过时才加载历史 =====
-        if (
-            self.session_manager
-            and self.session_id
-            and len(self.messages) == 0
-            and not self._session_loaded
-        ):
-            history = await self.session_manager.load_session(self.session_id)
-            if history:
-                self.messages = history
-            self._session_loaded = True
+        # ===== 发射 AGENT_START 事件 =====
+        await self.event_emitter.emit(
+            AgentStartEvent(
+                agent_id=self.session_id,
+                user_input=user_input,
+                config=self.config,
+            )
+        )
 
-        # 重置状态（但不清空 messages）
-        self.state = AgentState()
+        final_response: str | None = None
+        error_message: str | None = None
 
-        # 添加用户消息
-        user_msg = Message.user(user_input)
-        self.add_message(user_msg)
+        try:
+            # ===== 内存保护：只在 messages 为空且未加载过时才加载历史 =====
+            if (
+                self.session_manager
+                and self.session_id
+                and len(self.messages) == 0
+                and not self._session_loaded
+            ):
+                history = await self.session_manager.load_session(self.session_id)
+                if history:
+                    self.messages = history
+                self._session_loaded = True
 
-        # ===== 持久化用户消息 =====
-        if self.session_manager and self.session_id:
-            await self.session_manager.save_session(
-                session_id=self.session_id,
-                messages=self.messages,
-                title=None,  # title=None 触发标题保护逻辑
-                usage=self._usage_stats,
+            # 重置状态（但不清空 messages）
+            self.state = AgentState()
+
+            # 添加用户消息
+            user_msg = Message.user(user_input)
+            self.add_message(user_msg)
+
+            # ===== 发射 MESSAGE_UPDATE 事件 =====
+            await self.event_emitter.emit(
+                MessageUpdateEvent(
+                    agent_id=self.session_id,
+                    message=user_msg,
+                    role=user_msg.role.value,
+                    content_preview=user_input[:100] if user_input else None,
+                )
             )
 
-        # ReAct 循环
-        while self.state.step < self.config.max_steps:
-            self.state.step += 1
+            # ===== 持久化用户消息 =====
+            if self.session_manager and self.session_id:
+                await self.session_manager.save_session(
+                    session_id=self.session_id,
+                    messages=self.messages,
+                    title=None,  # title=None 触发标题保护逻辑
+                    usage=self._usage_stats,
+                )
 
-            # 1. 构建上下文并调用 LLM（现在是异步方法）
-            context = await self._build_context()
-            llm_tools = self.tools.to_llm_tools() if self.tools else None
+            # ReAct 循环
+            while self.state.step < self.config.max_steps:
+                self.state.step += 1
 
-            response = await self.llm.chat(
-                messages=context,
-                tools=llm_tools if llm_tools else None,
-            )
+                # ===== 发射 TURN_START 事件 =====
+                await self.event_emitter.emit(
+                    TurnStartEvent(
+                        agent_id=self.session_id,
+                        turn_number=self.state.step,
+                    )
+                )
 
-            # ===== 累积 Token 使用统计 =====
-            # 注意：当前 LLMClient.chat() 返回的 Message 不包含 usage
-            # 如果 LLM API 返回了 usage，需要在这里累积
-            # self._usage_stats = self._usage_stats.merge(...)
+                # 1. 构建上下文并调用 LLM
+                context = await self._build_context()
+                llm_tools = self.tools.to_llm_tools() if self.tools else None
 
-            # 2. 添加 assistant 消息到历史
-            assistant_msg = Message(
-                role=response.role,
-                content=response.content,
-                tool_calls=response.tool_calls,
-            )
-            self.add_message(assistant_msg)
+                response = await self.llm.chat(
+                    messages=context,
+                    tools=llm_tools if llm_tools else None,
+                )
 
-            # 3. 检查是否有工具调用
-            if not response.tool_calls:
-                # 没有工具调用，返回最终回复
-                self.state.finished = True
+                # ===== 累积 Token 使用统计 =====
+                # 注意：当前 LLMClient.chat() 返回的 Message 不包含 usage
+                # 如果 LLM API 返回了 usage，需要在这里累积
+                # self._usage_stats = self._usage_stats.merge(...)
 
-                # ===== 循环结束后保存会话 =====
+                # 2. 添加 assistant 消息到历史
+                assistant_msg = Message(
+                    role=response.role,
+                    content=response.content,
+                    tool_calls=response.tool_calls,
+                )
+                self.add_message(assistant_msg)
+
+                # ===== 发射 MESSAGE_UPDATE 事件 =====
+                await self.event_emitter.emit(
+                    MessageUpdateEvent(
+                        agent_id=self.session_id,
+                        message=assistant_msg,
+                        role=assistant_msg.role.value,
+                        content_preview=response.content[:100] if response.content else None,
+                    )
+                )
+
+                # 3. 检查是否有工具调用
+                if not response.tool_calls:
+                    # 没有工具调用，返回最终回复
+                    self.state.finished = True
+                    final_response = response.content or ""
+
+                    # ===== 发射 TURN_END 事件 =====
+                    await self.event_emitter.emit(
+                        TurnEndEvent(
+                            agent_id=self.session_id,
+                            turn_number=self.state.step,
+                            llm_response=response.content,
+                            tool_calls_made=0,
+                        )
+                    )
+
+                    # ===== 循环结束后保存会话 =====
+                    if self.session_manager and self.session_id:
+                        await self.session_manager.save_session(
+                            session_id=self.session_id,
+                            messages=self.messages,
+                            title=None,
+                            usage=self._usage_stats,
+                        )
+
+                    return final_response
+
+                # 4. 执行所有工具调用
+                tools_this_turn = 0
+                for tool_call in response.tool_calls:
+                    self.state.total_tool_calls += 1
+                    tool_result = await self._execute_tool(tool_call)
+                    self.add_message(tool_result)
+                    tools_this_turn += 1
+
+                # ===== 发射 TURN_END 事件 =====
+                await self.event_emitter.emit(
+                    TurnEndEvent(
+                        agent_id=self.session_id,
+                        turn_number=self.state.step,
+                        llm_response=response.content,
+                        tool_calls_made=tools_this_turn,
+                    )
+                )
+
+                # ===== 每轮循环后保存会话 =====
                 if self.session_manager and self.session_id:
                     await self.session_manager.save_session(
                         session_id=self.session_id,
@@ -210,15 +308,13 @@ class Agent:
                         usage=self._usage_stats,
                     )
 
-                return response.content or ""
+            # 超过最大步数
+            self.state.finished = True
+            final_response = (
+                f"[Agent 达到最大步数限制 ({self.config.max_steps})，任务可能未完成]"
+            )
 
-            # 4. 执行所有工具调用
-            for tool_call in response.tool_calls:
-                self.state.total_tool_calls += 1
-                tool_result = await self._execute_tool(tool_call)
-                self.add_message(tool_result)
-
-            # ===== 每轮循环后保存会话 =====
+            # ===== 保存会话 =====
             if self.session_manager and self.session_id:
                 await self.session_manager.save_session(
                     session_id=self.session_id,
@@ -227,19 +323,29 @@ class Agent:
                     usage=self._usage_stats,
                 )
 
-        # 超过最大步数
-        self.state.finished = True
+            return final_response
 
-        # ===== 保存会话 =====
-        if self.session_manager and self.session_id:
-            await self.session_manager.save_session(
-                session_id=self.session_id,
-                messages=self.messages,
-                title=None,
-                usage=self._usage_stats,
+        except Exception as e:
+            error_message = str(e)
+            # ===== 发射 ERROR 事件 =====
+            await self.event_emitter.emit(
+                ErrorEvent(
+                    agent_id=self.session_id,
+                    error_type=type(e).__name__,
+                    error_message=error_message,
+                )
             )
-
-        return f"[Agent 达到最大步数限制 ({self.config.max_steps})，任务可能未完成]"
+            raise
+        finally:
+            # ===== 发射 AGENT_END 事件 =====
+            await self.event_emitter.emit(
+                AgentEndEvent(
+                    agent_id=self.session_id,
+                    final_response=final_response,
+                    state=self.state,
+                    error=error_message,
+                )
+            )
 
     async def _execute_tool(self, tool_call: ToolCall) -> Message:
         """
@@ -261,12 +367,35 @@ class Agent:
         tool_name = tool_call.function.name
         arguments = tool_call.function.parse_arguments()
 
+        # ===== 发射 TOOL_CALL_START 事件 =====
+        await self.event_emitter.emit(
+            ToolCallStartEvent(
+                agent_id=self.session_id,
+                turn_number=self.state.step,
+                tool_name=tool_name,
+                tool_arguments=arguments,
+            )
+        )
+
+        start_time = time.time()
+
         # 1. 查找工具
         tool = self.tools.get(tool_name)
         if tool is None:
+            error_msg = f"错误：工具 '{tool_name}' 不存在"
+            # ===== 发射 TOOL_CALL_ERROR 事件 =====
+            await self.event_emitter.emit(
+                ToolCallErrorEvent(
+                    agent_id=self.session_id,
+                    turn_number=self.state.step,
+                    tool_name=tool_name,
+                    error_type="ToolNotFound",
+                    error_message=error_msg,
+                )
+            )
             return Message.tool_result(
                 tool_call_id=tool_call.id,
-                content=f"错误：工具 '{tool_name}' 不存在",
+                content=error_msg,
             )
 
         # 2. 运行 before_execute 钩子
@@ -281,6 +410,18 @@ class Agent:
             if not hook_result.proceed:
                 # 拦截：返回假结果
                 reason = hook_result.reason or "工具调用被拦截"
+                duration_ms = int((time.time() - start_time) * 1000)
+                # ===== 发射 TOOL_CALL_END 事件（拦截）=====
+                await self.event_emitter.emit(
+                    ToolCallEndEvent(
+                        agent_id=self.session_id,
+                        turn_number=self.state.step,
+                        tool_name=tool_name,
+                        success=False,
+                        result_preview=f"[拦截] {reason}",
+                        duration_ms=duration_ms,
+                    )
+                )
                 return Message.tool_result(
                     tool_call_id=tool_call.id,
                     content=f"[拦截] {reason}",
@@ -293,9 +434,36 @@ class Agent:
             if result.error:
                 content = f"错误：{result.error}"
         except Exception as e:
-            content = f"工具执行异常：{e}"
+            error_msg = f"工具执行异常：{e}"
+            duration_ms = int((time.time() - start_time) * 1000)
+            # ===== 发射 TOOL_CALL_ERROR 事件 =====
+            await self.event_emitter.emit(
+                ToolCallErrorEvent(
+                    agent_id=self.session_id,
+                    turn_number=self.state.step,
+                    tool_name=tool_name,
+                    error_type=type(e).__name__,
+                    error_message=error_msg,
+                )
+            )
+            return Message.tool_result(
+                tool_call_id=tool_call.id,
+                content=error_msg,
+            )
 
         # 4. 返回 tool_result 消息
+        duration_ms = int((time.time() - start_time) * 1000)
+        # ===== 发射 TOOL_CALL_END 事件 =====
+        await self.event_emitter.emit(
+            ToolCallEndEvent(
+                agent_id=self.session_id,
+                turn_number=self.state.step,
+                tool_name=tool_name,
+                success=True,
+                result_preview=content[:100] if content else None,
+                duration_ms=duration_ms,
+            )
+        )
         return Message.tool_result(
             tool_call_id=tool_call.id,
             content=content,
@@ -362,6 +530,17 @@ class Agent:
         self._compactions.append(result.entry)
         self._last_summary = result.entry.summary
         self.messages = result.kept_messages
+
+        # ===== 发射 CONTEXT_COMPACT 事件 =====
+        await self.event_emitter.emit(
+            ContextCompactEvent(
+                agent_id=self.session_id,
+                tokens_before=result.entry.tokens_before,
+                tokens_after=result.entry.tokens_after,
+                tokens_saved=result.tokens_saved,
+                summary_preview=result.entry.summary[:100],
+            )
+        )
 
         print(
             f"[Agent] 上下文压缩完成："
