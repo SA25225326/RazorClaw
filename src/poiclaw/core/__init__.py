@@ -6,6 +6,7 @@ PoiClaw Agent 核心模块。
 - BaseTool: 工具基类
 - ToolRegistry: 工具注册器
 - HookManager: 安全拦截钩子管理器
+- FileSessionManager: 会话持久化管理器
 """
 
 from .agent import Agent, AgentConfig, AgentState
@@ -15,6 +16,12 @@ from .hooks import (
     HookManager,
     HookResult,
     create_bash_safety_hook,
+)
+from .session import (
+    FileSessionManager,
+    SessionData,
+    SessionMetadata,
+    UsageStats,
 )
 from .tools import BaseTool, ToolRegistry, ToolResult
 
@@ -33,4 +40,9 @@ __all__ = [
     "HookResult",
     "BeforeExecuteHook",
     "create_bash_safety_hook",
+    # Session
+    "FileSessionManager",
+    "SessionMetadata",
+    "SessionData",
+    "UsageStats",
 ]

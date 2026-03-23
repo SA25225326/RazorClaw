@@ -8,6 +8,7 @@ from typing import Any
 from poiclaw.llm import LLMClient, Message, ToolCall
 
 from .hooks import HookContext, HookManager, HookResult
+from .session import FileSessionManager, UsageStats
 from .tools import BaseTool, ToolRegistry, ToolResult
 
 
@@ -52,7 +53,13 @@ class Agent:
         4. 如果 LLM 没有返回 tool_calls -> 返回最终回复
         5. 超过 max_steps -> 强制停止
 
+    会话管理：
+        - 支持会话持久化（通过 session_manager）
+        - 内存保护：只在 messages 为空时加载历史
+        - 标题保护：保存时 title=None 保留原标题
+
     用法：
+        # 基础用法（无会话持久化）
         agent = Agent(
             llm_client=LLMClient(...),
             tools=ToolRegistry(),
@@ -60,11 +67,16 @@ class Agent:
             config=AgentConfig(max_steps=10),
         )
 
-        # 注册工具
-        agent.tools.register(BashTool())
+        # 带会话持久化
+        session_manager = FileSessionManager()
+        session_id = session_manager.generate_id()
 
-        # 添加安全钩子
-        agent.hooks.add_before_execute(block_dangerous_commands)
+        agent = Agent(
+            llm_client=LLMClient(...),
+            tools=ToolRegistry(),
+            session_manager=session_manager,
+            session_id=session_id,
+        )
 
         # 运行
         response = await agent.run("帮我列出当前目录的文件")
@@ -76,6 +88,9 @@ class Agent:
         tools: ToolRegistry | None = None,
         hooks: HookManager | None = None,
         config: AgentConfig | None = None,
+        # ===== 会话管理参数 =====
+        session_manager: FileSessionManager | None = None,
+        session_id: str | None = None,
     ) -> None:
         self.llm = llm_client
         self.tools = tools or ToolRegistry()
@@ -84,18 +99,30 @@ class Agent:
         self.messages: list[Message] = []
         self.state = AgentState()
 
+        # ===== 会话管理属性 =====
+        self.session_manager = session_manager
+        self.session_id = session_id
+        self._usage_stats = UsageStats.zero()
+        self._session_loaded = False  # 防止重复加载
+
     def add_message(self, message: Message) -> None:
         """添加消息到历史"""
         self.messages.append(message)
 
     def clear_messages(self) -> None:
-        """清空对话历史"""
+        """清空对话历史（注意：不会删除持久化的会话文件）"""
         self.messages = []
         self.state = AgentState()
+        self._usage_stats = UsageStats.zero()
+        self._session_loaded = False
 
     def set_system_prompt(self, prompt: str) -> None:
         """设置系统提示词"""
         self.config.system_prompt = prompt
+
+    def get_usage_stats(self) -> UsageStats:
+        """获取当前的 Token 使用统计"""
+        return self._usage_stats
 
     async def run(self, user_input: str) -> str:
         """
@@ -107,11 +134,33 @@ class Agent:
         Returns:
             str: Agent 的最终回复
         """
-        # 重置状态
+        # ===== 内存保护：只在 messages 为空且未加载过时才加载历史 =====
+        if (
+            self.session_manager
+            and self.session_id
+            and len(self.messages) == 0
+            and not self._session_loaded
+        ):
+            history = await self.session_manager.load_session(self.session_id)
+            if history:
+                self.messages = history
+            self._session_loaded = True
+
+        # 重置状态（但不清空 messages）
         self.state = AgentState()
 
         # 添加用户消息
-        self.add_message(Message.user(user_input))
+        user_msg = Message.user(user_input)
+        self.add_message(user_msg)
+
+        # ===== 持久化用户消息 =====
+        if self.session_manager and self.session_id:
+            await self.session_manager.save_session(
+                session_id=self.session_id,
+                messages=self.messages,
+                title=None,  # title=None 触发标题保护逻辑
+                usage=self._usage_stats,
+            )
 
         # ReAct 循环
         while self.state.step < self.config.max_steps:
@@ -126,17 +175,33 @@ class Agent:
                 tools=llm_tools if llm_tools else None,
             )
 
+            # ===== 累积 Token 使用统计 =====
+            # 注意：当前 LLMClient.chat() 返回的 Message 不包含 usage
+            # 如果 LLM API 返回了 usage，需要在这里累积
+            # self._usage_stats = self._usage_stats.merge(...)
+
             # 2. 添加 assistant 消息到历史
-            self.add_message(Message(
+            assistant_msg = Message(
                 role=response.role,
                 content=response.content,
                 tool_calls=response.tool_calls,
-            ))
+            )
+            self.add_message(assistant_msg)
 
             # 3. 检查是否有工具调用
             if not response.tool_calls:
                 # 没有工具调用，返回最终回复
                 self.state.finished = True
+
+                # ===== 循环结束后保存会话 =====
+                if self.session_manager and self.session_id:
+                    await self.session_manager.save_session(
+                        session_id=self.session_id,
+                        messages=self.messages,
+                        title=None,
+                        usage=self._usage_stats,
+                    )
+
                 return response.content or ""
 
             # 4. 执行所有工具调用
@@ -145,8 +210,27 @@ class Agent:
                 tool_result = await self._execute_tool(tool_call)
                 self.add_message(tool_result)
 
+            # ===== 每轮循环后保存会话 =====
+            if self.session_manager and self.session_id:
+                await self.session_manager.save_session(
+                    session_id=self.session_id,
+                    messages=self.messages,
+                    title=None,
+                    usage=self._usage_stats,
+                )
+
         # 超过最大步数
         self.state.finished = True
+
+        # ===== 保存会话 =====
+        if self.session_manager and self.session_id:
+            await self.session_manager.save_session(
+                session_id=self.session_id,
+                messages=self.messages,
+                title=None,
+                usage=self._usage_stats,
+            )
+
         return f"[Agent 达到最大步数限制 ({self.config.max_steps})，任务可能未完成]"
 
     async def _execute_tool(self, tool_call: ToolCall) -> Message:
