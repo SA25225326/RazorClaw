@@ -1,0 +1,21 @@
+{
+  "name": "poiclaw-feishu-bot",
+  "version": "1.0.0",
+  "description": "PoiClaw Feishu Bot - Node.js version",
+  "main": "feishu-bot.js",
+  "scripts": {
+    "start": "node feishu-bot.js",
+    "test": "node test-feishu-ws.js",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop poiclaw-node",
+    "pm2:logs": "pm2 logs poiclaw-node"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.59.0",
+    "dotenv": "^16.6.1",
+    "node-fetch": "^3.3.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
