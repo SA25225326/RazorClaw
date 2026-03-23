@@ -2,11 +2,11 @@
  * PoiClaw 飞书机器人 - Node.js 版本
  *
  * 使用 @larksuiteoapi/node-sdk 的 WebSocket 长连接模式
+ * 调用 Python Agent API 处理消息
  *
  * 使用方式：
- *   1. 安装依赖：npm install
- *   2. 配置 .env 文件
- *   3. 运行：node feishu-bot.js
+ *   1. 先启动 Python API：uv run python api_server.py
+ *   2. 再启动飞书机器人：node feishu-bot.js
  */
 
 require('dotenv').config();
@@ -15,9 +15,7 @@ const Lark = require('@larksuiteoapi/node-sdk');
 // 配置
 const APP_ID = process.env.FEISHU_APP_ID;
 const APP_SECRET = process.env.FEISHU_APP_SECRET;
-const LLM_BASE_URL = process.env.OPENAI_BASE_URL;
-const LLM_API_KEY = process.env.OPENAI_API_KEY;
-const LLM_MODEL = process.env.OPENAI_MODEL || 'glm-4-flash';
+const AGENT_API_URL = process.env.AGENT_API_URL || 'http://127.0.0.1:8080';
 
 // 检查配置
 if (!APP_ID || !APP_SECRET) {
@@ -30,9 +28,10 @@ console.log('  PoiClaw Feishu Bot (Node.js)');
 console.log('========================================');
 console.log(`App ID: ${APP_ID}`);
 console.log(`App Secret: ${APP_SECRET.substring(0, 10)}...`);
+console.log(`Agent API: ${AGENT_API_URL}`);
 console.log('');
 
-// 创建飞书客户端（用于发送消息）- 完全按照 OpenClaw 的方式
+// 创建飞书客户端（用于发送消息）
 const client = new Lark.Client({
   appId: APP_ID,
   appSecret: APP_SECRET,
@@ -40,53 +39,41 @@ const client = new Lark.Client({
   domain: Lark.Domain.Feishu,
 });
 
-// 创建事件分发器 - 完全按照 OpenClaw 的方式
+// 创建事件分发器
 const eventDispatcher = new Lark.EventDispatcher({
   encryptKey: '',
   verificationToken: '',
 });
 
-// 用户会话存储（简单的内存存储，生产环境应该用文件或数据库）
-const userSessions = new Map();
-
 /**
- * 调用 LLM API
+ * 调用 Python Agent API
  */
-async function callLLM(userInput, messages) {
+async function callAgentAPI(message, sessionId) {
   const fetch = (await import('node-fetch')).default;
 
-  // 构建消息历史
-  const allMessages = [
-    { role: 'system', content: '你是一个有帮助的 AI 助手。' },
-    ...messages,
-    { role: 'user', content: userInput }
-  ];
-
   try {
-    const response = await fetch(`${LLM_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${AGENT_API_URL}/chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${LLM_API_KEY}`,
       },
       body: JSON.stringify({
-        model: LLM_MODEL,
-        messages: allMessages,
-        max_tokens: 2000,
+        message: message,
+        session_id: sessionId,
       }),
     });
 
-    const data = await response.json();
-
-    if (data.error) {
-      console.error('LLM API Error:', data.error);
-      return `抱歉，调用 AI 时出错：${data.error.message}`;
+    if (!response.ok) {
+      const error = await response.text();
+      console.error('Agent API Error:', error);
+      return `抱歉，处理您的请求时出错：${response.status} ${response.statusText}`;
     }
 
-    return data.choices[0].message.content;
+    const data = await response.json();
+    return data.response;
   } catch (error) {
-    console.error('LLM Error:', error);
-    return `抱歉，处理您的请求时出错：${error.message}`;
+    console.error('Agent API Error:', error);
+    return `抱歉，无法连接到 Agent 服务。请确认 api_server.py 正在运行。`;
   }
 }
 
@@ -140,29 +127,14 @@ async function handleMessage(event) {
     return;
   }
 
-  // 获取用户 ID
+  // 获取用户 ID（作为 session_id）
   const openId = sender.sender_id.open_id;
 
   console.log(`收到消息: open_id=${openId}, text=${text.substring(0, 50)}...`);
 
-  // 获取或创建用户会话
-  if (!userSessions.has(openId)) {
-    userSessions.set(openId, { messages: [] });
-  }
-  const session = userSessions.get(openId);
-
-  // 调用 LLM
-  console.log('正在调用 LLM...');
-  const response = await callLLM(text, session.messages);
-
-  // 保存对话历史
-  session.messages.push({ role: 'user', content: text });
-  session.messages.push({ role: 'assistant', content: response });
-
-  // 限制历史长度（保留最近 20 条）
-  if (session.messages.length > 20) {
-    session.messages = session.messages.slice(-20);
-  }
+  // 调用 Python Agent API
+  console.log('正在调用 Python Agent API...');
+  const response = await callAgentAPI(text, openId);
 
   // 回复消息
   const success = await sendMessage(openId, response);
@@ -199,7 +171,8 @@ const wsClient = new Lark.WSClient({
 
 console.log('正在连接飞书 WebSocket...');
 console.log('');
-console.log('>>> 请在飞书中给机器人发送消息测试 <<<');
+console.log('>>> 请确保 Python API 已启动：uv run python api_server.py <<<');
+console.log('>>> 然后在飞书中给机器人发送消息测试 <<<');
 console.log('');
 
 // 启动 WebSocket 连接

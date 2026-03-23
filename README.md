@@ -528,33 +528,53 @@ asyncio.run(main())
 
 PoiClaw 支持通过飞书官方 SDK 的 WebSocket 长连接模式接入飞书，**无需内网穿透**。
 
-### Node.js 版本（推荐）
+### 架构
 
-Node.js 版本使用 `@larksuiteoapi/node-sdk`，更稳定可靠。
-
-**安装依赖**：
-```bash
-npm install
+```
+飞书消息 → Node.js (feishu-bot.js) → HTTP → Python Agent (api_server.py) → 工具执行
 ```
 
-**启动机器人**：
+- **Node.js**：负责飞书 WebSocket 连接，接收和发送消息
+- **Python Agent**：负责 LLM 调用和工具执行
+
+### 启动方式
+
+**需要开两个终端**：
+
+**终端 1 - 启动 Python API**：
 ```bash
+uv run python api_server.py
+```
+
+**终端 2 - 启动飞书机器人**：
+```bash
+npm install  # 首次运行需要安装依赖
 node feishu-bot.js
 ```
 
-**PM2 后台运行**：
+### 功能
+
+飞书机器人支持：
+- ✅ 执行命令（bash）
+- ✅ 读取文件（read_file）
+- ✅ 写入文件（write_file）
+- ✅ 编辑文件（edit_file）
+- ✅ 多轮对话（有上下文记忆）
+
+### PM2 后台运行
+
 ```bash
+# 启动 Python API
+pm2 start "uv run python api_server.py" --name poiclaw-api
+
+# 启动飞书机器人
 pm2 start feishu-bot.js --name poiclaw-feishu
-pm2 logs poiclaw-feishu
-```
 
-### Python 版本
+# 查看日志
+pm2 logs
 
-Python 版本使用 `lark-oapi` SDK。
-
-**启动机器人**：
-```bash
-uv run python main.py
+# 停止
+pm2 stop poiclaw-api poiclaw-feishu
 ```
 
 ### 配置步骤
