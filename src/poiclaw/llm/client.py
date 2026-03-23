@@ -219,7 +219,7 @@ class LLMClient:
 
     def _parse_response(self, data: dict[str, Any]) -> Message:
         """解析非流式响应"""
-        from .types import FunctionCall, MessageRole, ToolCall
+        from .types import FunctionCall, MessageRole, ToolCall, Usage
 
         choice = data.get("choices", [{}])[0]
         message_data = choice.get("message", {})
@@ -241,10 +241,21 @@ class LLMClient:
                 for tc in tool_calls_data
             ]
 
+        # 解析 usage
+        usage = None
+        usage_data = data.get("usage")
+        if usage_data:
+            usage = Usage(
+                prompt_tokens=usage_data.get("prompt_tokens", 0),
+                completion_tokens=usage_data.get("completion_tokens", 0),
+                total_tokens=usage_data.get("total_tokens", 0),
+            )
+
         return Message(
             role=MessageRole.ASSISTANT,
             content=content,
             tool_calls=tool_calls,
+            usage=usage,
         )
 
     def collect_stream(self, events: AsyncGenerator[StreamEvent, None]) -> "StreamCollector":

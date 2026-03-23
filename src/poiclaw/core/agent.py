@@ -7,8 +7,9 @@ from typing import Any
 
 from poiclaw.llm import LLMClient, Message, ToolCall
 
+from .compaction import CompactionSettings, compact, get_latest_summary, should_compact
 from .hooks import HookContext, HookManager, HookResult
-from .session import FileSessionManager, UsageStats
+from .session import CompactionEntry, FileSessionManager, UsageStats
 from .tools import BaseTool, ToolRegistry, ToolResult
 
 
@@ -91,6 +92,8 @@ class Agent:
         # ===== 会话管理参数 =====
         session_manager: FileSessionManager | None = None,
         session_id: str | None = None,
+        # ===== 压缩配置 =====
+        compaction_settings: CompactionSettings | None = None,
     ) -> None:
         self.llm = llm_client
         self.tools = tools or ToolRegistry()
@@ -104,6 +107,11 @@ class Agent:
         self.session_id = session_id
         self._usage_stats = UsageStats.zero()
         self._session_loaded = False  # 防止重复加载
+
+        # ===== 压缩配置 =====
+        self.compaction_settings = compaction_settings or CompactionSettings()
+        self._compactions: list[CompactionEntry] = []  # 压缩历史
+        self._last_summary: str | None = None  # 最新摘要缓存
 
     def add_message(self, message: Message) -> None:
         """添加消息到历史"""
@@ -166,8 +174,8 @@ class Agent:
         while self.state.step < self.config.max_steps:
             self.state.step += 1
 
-            # 1. 构建上下文并调用 LLM
-            context = self._build_context()
+            # 1. 构建上下文并调用 LLM（现在是异步方法）
+            context = await self._build_context()
             llm_tools = self.tools.to_llm_tools() if self.tools else None
 
             response = await self.llm.chat(
@@ -293,11 +301,16 @@ class Agent:
             content=content,
         )
 
-    def _build_context(self) -> list[Message]:
+    async def _build_context(self) -> list[Message]:
         """
         构建发送给 LLM 的上下文。
 
-        包括：system prompt（如果有）+ 对话历史
+        包括：system prompt（如果有）+ [摘要] + 对话历史
+
+        压缩逻辑：
+            1. 检查是否需要压缩（should_compact）
+            2. 如果需要，执行压缩并更新会话
+            3. 返回压缩后的上下文
         """
         context: list[Message] = []
 
@@ -305,10 +318,60 @@ class Agent:
         if self.config.system_prompt:
             context.append(Message.system(self.config.system_prompt))
 
+        # ===== 检查是否需要压缩 =====
+        if should_compact(self.messages, self.compaction_settings):
+            await self._run_compaction()
+
+        # ===== 添加摘要（如果有）=====
+        if self._last_summary:
+            summary_content = f"""[上下文摘要]
+
+{self._last_summary}
+
+---
+*以上是对之前对话的摘要，保留关键信息以便继续工作。*
+"""
+            context.append(Message.system(summary_content))
+
         # 添加对话历史
         context.extend(self.messages)
 
         return context
+
+    async def _run_compaction(self) -> None:
+        """
+        执行上下文压缩。
+
+        流程：
+            1. 调用 compaction.compact() 生成摘要
+            2. 更新压缩历史
+            3. 更新消息列表（替换为摘要 + 保留消息）
+            4. 持久化压缩条目
+        """
+        result = await compact(
+            messages=self.messages,
+            llm=self.llm,
+            settings=self.compaction_settings,
+            previous_summary=self._last_summary,
+        )
+
+        if result is None:
+            return  # 无需压缩
+
+        # 更新状态
+        self._compactions.append(result.entry)
+        self._last_summary = result.entry.summary
+        self.messages = result.kept_messages
+
+        print(
+            f"[Agent] 上下文压缩完成："
+            f"{result.entry.tokens_before} -> {result.entry.tokens_after} tokens "
+            f"(节省 {result.tokens_saved})"
+        )
+
+        # 持久化压缩条目
+        if self.session_manager and self.session_id:
+            await self.session_manager.add_compaction(self.session_id, result.entry)
 
     # ============ 流式版本（可选） ============
 
@@ -330,7 +393,7 @@ class Agent:
         while self.state.step < self.config.max_steps:
             self.state.step += 1
 
-            context = self._build_context()
+            context = await self._build_context()
             llm_tools = self.tools.to_llm_tools() if self.tools else None
 
             # 流式调用 LLM

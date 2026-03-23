@@ -61,6 +61,54 @@ class UsageStats(BaseModel):
         return cls()
 
 
+# ============================================================================
+# Compaction 数据模型
+# ============================================================================
+
+
+class CompactionEntry(BaseModel):
+    """
+    压缩条目，存储在 SessionData.compactions 中。
+
+    Attributes:
+        id: 唯一标识符（UUID）
+        timestamp: 压缩发生时间（ISO 8601）
+        summary: LLM 生成的结构化摘要
+        first_kept_msg_idx: 第一个保留的消息在原始列表中的索引
+        tokens_before: 压缩前的 token 估算值
+        tokens_after: 压缩后的 token 估算值（摘要 + 保留消息）
+    """
+
+    id: str
+    timestamp: str
+    summary: str
+    first_kept_msg_idx: int
+    tokens_before: int
+    tokens_after: int
+
+
+class CompactionSettings(BaseModel):
+    """
+    压缩配置。
+
+    Attributes:
+        enabled: 是否启用自动压缩
+        context_window: 模型上下文窗口大小
+        reserve_tokens: 保留的 token 缓冲区（用于 LLM 响应）
+        keep_recent_tokens: 保留最近 N tokens 的消息（不被压缩）
+    """
+
+    enabled: bool = True
+    context_window: int = 128000
+    reserve_tokens: int = 16384
+    keep_recent_tokens: int = 20000
+
+    @property
+    def threshold(self) -> int:
+        """压缩触发阈值：context_window - reserve_tokens"""
+        return self.context_window - self.reserve_tokens
+
+
 class SessionMetadata(BaseModel):
     """
     会话元数据（轻量，用于列表展示）。
@@ -90,6 +138,7 @@ class SessionData(BaseModel):
     last_modified: str  # ISO 8601
     messages: list[dict]  # Message 的序列化形式
     usage: UsageStats = Field(default_factory=UsageStats)
+    compactions: list[CompactionEntry] = Field(default_factory=list)  # 压缩历史
 
 
 # ============================================================================
@@ -306,6 +355,7 @@ class FileSessionManager:
         messages: list[Message],
         title: str | None = None,
         usage: UsageStats | None = None,
+        compactions: list[CompactionEntry] | None = None,
     ) -> bool:
         """
         保存会话（同时保存 metadata 和 data）。
@@ -314,11 +364,16 @@ class FileSessionManager:
             - 如果 title 为 None，读取现有 metadata 保留原标题
             - 如果是新会话且无标题，从首条用户消息生成
 
+        压缩保护逻辑：
+            - 如果 compactions 为 None，读取现有 data 保留原压缩历史
+            - 如果 compactions 提供则更新
+
         Args:
             session_id: 会话 ID
             messages: 消息列表
             title: 会话标题（None 时保留原标题）
             usage: Token 使用统计
+            compactions: 压缩历史（None 时保留原压缩历史）
 
         Returns:
             是否成功
@@ -351,6 +406,19 @@ class FileSessionManager:
         else:
             created_at = now
 
+        # 压缩保护：如果 compactions 为 None，读取现有压缩历史
+        if compactions is None:
+            existing_data = await self._read_json_async(self._get_data_path(session_id))
+            if existing_data and "compactions" in existing_data:
+                try:
+                    compactions = [
+                        CompactionEntry.model_validate(c) for c in existing_data["compactions"]
+                    ]
+                except Exception:
+                    compactions = []
+            else:
+                compactions = []
+
         # 构建 metadata
         metadata = SessionMetadata(
             id=session_id,
@@ -370,6 +438,7 @@ class FileSessionManager:
             last_modified=now,
             messages=messages_data,
             usage=usage,
+            compactions=compactions,
         )
 
         # 并行写入
@@ -559,3 +628,48 @@ class FileSessionManager:
         """
         metadata = await self.get_metadata(session_id)
         return metadata.usage if metadata else None
+
+    async def get_compactions(self, session_id: str) -> list[CompactionEntry]:
+        """
+        获取会话的压缩历史。
+
+        Args:
+            session_id: 会话 ID
+
+        Returns:
+            压缩条目列表，不存在返回空列表
+        """
+        data_dict = await self._read_json_async(self._get_data_path(session_id))
+        if data_dict is None or "compactions" not in data_dict:
+            return []
+
+        try:
+            return [CompactionEntry.model_validate(c) for c in data_dict["compactions"]]
+        except Exception:
+            return []
+
+    async def add_compaction(self, session_id: str, compaction: CompactionEntry) -> bool:
+        """
+        添加压缩条目到会话。
+
+        Args:
+            session_id: 会话 ID
+            compaction: 压缩条目
+
+        Returns:
+            是否成功
+        """
+        # 读取现有压缩历史
+        compactions = await self.get_compactions(session_id)
+        compactions.append(compaction)
+
+        # 读取现有 data 并更新
+        data_dict = await self._read_json_async(self._get_data_path(session_id))
+        if data_dict is None:
+            print(f"[SessionManager] 警告：会话数据不存在 {session_id}")
+            return False
+
+        data_dict["compactions"] = [c.model_dump(mode="json") for c in compactions]
+        data_dict["last_modified"] = datetime.now().isoformat()
+
+        return await self._write_json_async(self._get_data_path(session_id), data_dict)

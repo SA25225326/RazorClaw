@@ -83,6 +83,7 @@ class Message(BaseModel):
     content: str | None = None
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None  # 仅用于 tool 角色的消息
+    usage: Usage | None = None  # Token 使用量（仅 assistant 消息可能有）
 
     def to_api_format(self) -> dict[str, Any]:
         """转换为 OpenAI API 格式"""
