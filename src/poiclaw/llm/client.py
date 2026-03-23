@@ -99,7 +99,11 @@ class LLMClient:
             payload["max_tokens"] = max_tokens
 
         if tools:
-            payload["tools"] = [tool.model_dump() for tool in tools]
+            # tools 可能是 dict 或 Pydantic 模型
+            payload["tools"] = [
+                tool.model_dump() if hasattr(tool, "model_dump") else tool
+                for tool in tools
+            ]
             payload["tool_choice"] = tool_choice
 
         return payload
