@@ -108,6 +108,8 @@ class Agent:
         compaction_settings: CompactionSettings | None = None,
         # ===== 事件系统 =====
         event_emitter: EventEmitter | None = None,
+        # ===== 渐进式工具加载 =====
+        progressive_tools: bool = False,
     ) -> None:
         self.llm = llm_client
         self.tools = tools or ToolRegistry()
@@ -129,6 +131,9 @@ class Agent:
 
         # ===== 事件系统 =====
         self.event_emitter = event_emitter or EventEmitter()
+
+        # ===== 渐进式工具加载 =====
+        self.progressive_tools = progressive_tools
 
     def add_message(self, message: Message) -> None:
         """添加消息到历史"""
@@ -224,7 +229,12 @@ class Agent:
 
                 # 1. 构建上下文并调用 LLM
                 context = await self._build_context()
-                llm_tools = self.tools.to_llm_tools() if self.tools else None
+
+                # 渐进式工具加载：不注入工具 Schema，让 Agent 用 list_tools 查询
+                if self.progressive_tools:
+                    llm_tools = None
+                else:
+                    llm_tools = self.tools.to_llm_tools() if self.tools else None
 
                 response = await self.llm.chat(
                     messages=context,
@@ -479,12 +489,26 @@ class Agent:
             1. 检查是否需要压缩（should_compact）
             2. 如果需要，执行压缩并更新会话
             3. 返回压缩后的上下文
+
+        渐进式工具加载：
+            - 如果 progressive_tools=True，在 system prompt 末尾添加工具简介
         """
         context: list[Message] = []
 
+        # 构建 system prompt
+        system_prompt = self.config.system_prompt or ""
+
+        # 渐进式模式：把工具简介加到 system prompt
+        if self.progressive_tools and self.tools:
+            tools_brief = self.tools.to_brief()
+            if system_prompt:
+                system_prompt = f"{system_prompt}\n\n{tools_brief}"
+            else:
+                system_prompt = tools_brief
+
         # 添加 system prompt
-        if self.config.system_prompt:
-            context.append(Message.system(self.config.system_prompt))
+        if system_prompt:
+            context.append(Message.system(system_prompt))
 
         # ===== 检查是否需要压缩 =====
         if should_compact(self.messages, self.compaction_settings):
@@ -573,7 +597,12 @@ class Agent:
             self.state.step += 1
 
             context = await self._build_context()
-            llm_tools = self.tools.to_llm_tools() if self.tools else None
+
+            # 渐进式工具加载：不注入工具 Schema，让 Agent 用 list_tools 查询
+            if self.progressive_tools:
+                llm_tools = None
+            else:
+                llm_tools = self.tools.to_llm_tools() if self.tools else None
 
             # 流式调用 LLM
             accumulated_content = ""

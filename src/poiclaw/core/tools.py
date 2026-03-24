@@ -138,3 +138,17 @@ class ToolRegistry:
 
     def __contains__(self, name: str) -> bool:
         return name in self._tools
+
+    def to_brief(self) -> str:
+        """返回工具的简要描述（用于渐进式加载的初始注入）"""
+        lines = []
+        for tool in self._tools.values():
+            # 只取第一句描述（按句号或英文句点分割）
+            first_sentence = tool.description.split('。')[0].split('.')[0]
+            lines.append(f"- {tool.name}: {first_sentence}")
+        return "可用工具（使用 list_tools 查询详情）:\n" + "\n".join(lines)
+
+    def get_tool_schema(self, name: str) -> dict[str, Any] | None:
+        """按需获取单个工具的完整 Schema"""
+        tool = self._tools.get(name)
+        return tool.to_llm_tool() if tool else None
