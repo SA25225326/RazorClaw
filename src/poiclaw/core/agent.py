@@ -24,6 +24,7 @@ from .events import (
 )
 from .hooks import HookContext, HookManager, HookResult
 from .session import CompactionEntry, FileSessionManager, UsageStats
+from .session_tree import TreeSessionManager
 from .tools import BaseTool, ToolRegistry, ToolResult
 
 
@@ -102,7 +103,7 @@ class Agent:
         hooks: HookManager | None = None,
         config: AgentConfig | None = None,
         # ===== 会话管理参数 =====
-        session_manager: FileSessionManager | None = None,
+        session_manager: FileSessionManager | TreeSessionManager | None = None,
         session_id: str | None = None,
         # ===== 压缩配置 =====
         compaction_settings: CompactionSettings | None = None,
@@ -123,6 +124,10 @@ class Agent:
         self.session_id = session_id
         self._usage_stats = UsageStats.zero()
         self._session_loaded = False  # 防止重复加载
+
+        # ===== 树形 Session 支持 =====
+        self._is_tree_session = isinstance(session_manager, TreeSessionManager)
+        self._entry_ids: list[str] = []  # 消息对应的 Entry ID（用于树形 Session）
 
         # ===== 压缩配置 =====
         self.compaction_settings = compaction_settings or CompactionSettings()
@@ -485,6 +490,10 @@ class Agent:
 
         包括：system prompt（如果有）+ [摘要] + 对话历史
 
+        树形 Session 支持：
+            - 如果使用 TreeSessionManager，使用 build_session_context() 构建上下文
+            - 自动处理 compaction 路径
+
         压缩逻辑：
             1. 检查是否需要压缩（should_compact）
             2. 如果需要，执行压缩并更新会话
@@ -510,7 +519,14 @@ class Agent:
         if system_prompt:
             context.append(Message.system(system_prompt))
 
-        # ===== 检查是否需要压缩 =====
+        # ===== 树形 Session：使用 build_session_context =====
+        if self._is_tree_session and self.session_manager:
+            # 树形 Session 的上下文构建由 TreeSessionManager 处理
+            # compaction 已经在 get_branch() 路径中处理
+            context.extend(self.messages)
+            return context
+
+        # ===== 扁平 Session：检查是否需要压缩 =====
         if should_compact(self.messages, self.compaction_settings):
             await self._run_compaction()
 
@@ -539,12 +555,17 @@ class Agent:
             2. 更新压缩历史
             3. 更新消息列表（替换为摘要 + 保留消息）
             4. 持久化压缩条目
+
+        树形 Session 支持：
+            - 传递 entry_ids 以生成 first_kept_entry_id
+            - 使用 TreeSessionManager.append_compaction() 持久化
         """
         result = await compact(
             messages=self.messages,
             llm=self.llm,
             settings=self.compaction_settings,
             previous_summary=self._last_summary,
+            entry_ids=self._entry_ids if self._is_tree_session else None,
         )
 
         if result is None:
@@ -554,6 +575,15 @@ class Agent:
         self._compactions.append(result.entry)
         self._last_summary = result.entry.summary
         self.messages = result.kept_messages
+
+        # ===== 树形 Session：更新 entry_ids =====
+        if self._is_tree_session and result.first_kept_entry_id:
+            # 找到 first_kept_entry_id 在 entry_ids 中的索引
+            try:
+                keep_idx = self._entry_ids.index(result.first_kept_entry_id)
+                self._entry_ids = self._entry_ids[keep_idx:]
+            except ValueError:
+                pass
 
         # ===== 发射 CONTEXT_COMPACT 事件 =====
         await self.event_emitter.emit(
@@ -574,7 +604,18 @@ class Agent:
 
         # 持久化压缩条目
         if self.session_manager and self.session_id:
-            await self.session_manager.add_compaction(self.session_id, result.entry)
+            if self._is_tree_session:
+                # 树形 Session：使用 append_compaction
+                tree_manager: TreeSessionManager = self.session_manager  # type: ignore
+                tree_manager.append_compaction(
+                    summary=result.entry.summary,
+                    first_kept_entry_id=result.first_kept_entry_id or "",
+                    tokens_before=result.entry.tokens_before,
+                    tokens_after=result.entry.tokens_after,
+                )
+            else:
+                # 扁平 Session：使用 add_compaction
+                await self.session_manager.add_compaction(self.session_id, result.entry)
 
     # ============ 流式版本（可选） ============
 

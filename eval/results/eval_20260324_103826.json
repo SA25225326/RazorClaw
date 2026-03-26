@@ -1,0 +1,298 @@
+{
+  "timestamp": "2026-03-24T10:38:26.783237",
+  "total_tasks": 10,
+  "total_runs": 30,
+  "pass_at_1": 0.4666666666666667,
+  "pass_at_3": 0.6,
+  "pass_at_5": 0.6,
+  "summary": {
+    "by_difficulty": {
+      "easy": {
+        "total": 9,
+        "success": 3
+      },
+      "medium": {
+        "total": 9,
+        "success": 6
+      },
+      "hard": {
+        "total": 12,
+        "success": 5
+      }
+    },
+    "total_tokens": 37677,
+    "avg_duration_ms": 108.5
+  },
+  "results": [
+    {
+      "task_id": "read_file_01",
+      "run_id": 0,
+      "success": true,
+      "message": "成功读取文件内容",
+      "tokens_used": 722,
+      "duration_ms": 113,
+      "error": null
+    },
+    {
+      "task_id": "read_file_01",
+      "run_id": 1,
+      "success": true,
+      "message": "成功读取文件内容",
+      "tokens_used": 636,
+      "duration_ms": 108,
+      "error": null
+    },
+    {
+      "task_id": "read_file_01",
+      "run_id": 2,
+      "success": true,
+      "message": "成功读取文件内容",
+      "tokens_used": 1648,
+      "duration_ms": 106,
+      "error": null
+    },
+    {
+      "task_id": "write_file_01",
+      "run_id": 0,
+      "success": false,
+      "message": "文件未创建或内容不正确",
+      "tokens_used": 1214,
+      "duration_ms": 108,
+      "error": null
+    },
+    {
+      "task_id": "write_file_01",
+      "run_id": 1,
+      "success": false,
+      "message": "文件未创建或内容不正确",
+      "tokens_used": 1913,
+      "duration_ms": 109,
+      "error": null
+    },
+    {
+      "task_id": "write_file_01",
+      "run_id": 2,
+      "success": false,
+      "message": "文件未创建或内容不正确",
+      "tokens_used": 709,
+      "duration_ms": 110,
+      "error": null
+    },
+    {
+      "task_id": "edit_file_01",
+      "run_id": 0,
+      "success": false,
+      "message": "编辑失败，当前内容: Hello OLD World\n",
+      "tokens_used": 1302,
+      "duration_ms": 111,
+      "error": null
+    },
+    {
+      "task_id": "edit_file_01",
+      "run_id": 1,
+      "success": false,
+      "message": "编辑失败，当前内容: Hello OLD World\n",
+      "tokens_used": 1094,
+      "duration_ms": 109,
+      "error": null
+    },
+    {
+      "task_id": "edit_file_01",
+      "run_id": 2,
+      "success": false,
+      "message": "编辑失败，当前内容: Hello OLD World\n",
+      "tokens_used": 862,
+      "duration_ms": 110,
+      "error": null
+    },
+    {
+      "task_id": "list_files_01",
+      "run_id": 0,
+      "success": true,
+      "message": "成功列出 3 个文件",
+      "tokens_used": 1451,
+      "duration_ms": 108,
+      "error": null
+    },
+    {
+      "task_id": "list_files_01",
+      "run_id": 1,
+      "success": true,
+      "message": "成功列出 3 个文件",
+      "tokens_used": 1536,
+      "duration_ms": 107,
+      "error": null
+    },
+    {
+      "task_id": "list_files_01",
+      "run_id": 2,
+      "success": true,
+      "message": "成功列出 3 个文件",
+      "tokens_used": 1098,
+      "duration_ms": 107,
+      "error": null
+    },
+    {
+      "task_id": "code_analysis_01",
+      "run_id": 0,
+      "success": true,
+      "message": "成功读取代码文件",
+      "tokens_used": 964,
+      "duration_ms": 108,
+      "error": null
+    },
+    {
+      "task_id": "code_analysis_01",
+      "run_id": 1,
+      "success": true,
+      "message": "成功读取代码文件",
+      "tokens_used": 1566,
+      "duration_ms": 108,
+      "error": null
+    },
+    {
+      "task_id": "code_analysis_01",
+      "run_id": 2,
+      "success": true,
+      "message": "成功读取代码文件",
+      "tokens_used": 1981,
+      "duration_ms": 109,
+      "error": null
+    },
+    {
+      "task_id": "merge_files_01",
+      "run_id": 0,
+      "success": false,
+      "message": "模拟执行失败",
+      "tokens_used": 1231,
+      "duration_ms": 109,
+      "error": null
+    },
+    {
+      "task_id": "merge_files_01",
+      "run_id": 1,
+      "success": false,
+      "message": "模拟执行失败",
+      "tokens_used": 920,
+      "duration_ms": 107,
+      "error": null
+    },
+    {
+      "task_id": "merge_files_01",
+      "run_id": 2,
+      "success": false,
+      "message": "合并文件不存在或内容不正确",
+      "tokens_used": 1386,
+      "duration_ms": 109,
+      "error": null
+    },
+    {
+      "task_id": "bug_fix_01",
+      "run_id": 0,
+      "success": false,
+      "message": "模拟执行失败",
+      "tokens_used": 1025,
+      "duration_ms": 107,
+      "error": null
+    },
+    {
+      "task_id": "bug_fix_01",
+      "run_id": 1,
+      "success": false,
+      "message": "模拟执行失败",
+      "tokens_used": 568,
+      "duration_ms": 108,
+      "error": null
+    },
+    {
+      "task_id": "bug_fix_01",
+      "run_id": 2,
+      "success": true,
+      "message": "成功修复 Bug",
+      "tokens_used": 1292,
+      "duration_ms": 110,
+      "error": null
+    },
+    {
+      "task_id": "refactor_01",
+      "run_id": 0,
+      "success": false,
+      "message": "模拟执行失败",
+      "tokens_used": 1518,
+      "duration_ms": 108,
+      "error": null
+    },
+    {
+      "task_id": "refactor_01",
+      "run_id": 1,
+      "success": true,
+      "message": "重构任务完成",
+      "tokens_used": 1791,
+      "duration_ms": 109,
+      "error": null
+    },
+    {
+      "task_id": "refactor_01",
+      "run_id": 2,
+      "success": true,
+      "message": "重构任务完成",
+      "tokens_used": 1668,
+      "duration_ms": 107,
+      "error": null
+    },
+    {
+      "task_id": "write_test_01",
+      "run_id": 0,
+      "success": false,
+      "message": "测试文件不存在或格式不正确",
+      "tokens_used": 1739,
+      "duration_ms": 106,
+      "error": null
+    },
+    {
+      "task_id": "write_test_01",
+      "run_id": 1,
+      "success": false,
+      "message": "模拟执行失败",
+      "tokens_used": 620,
+      "duration_ms": 108,
+      "error": null
+    },
+    {
+      "task_id": "write_test_01",
+      "run_id": 2,
+      "success": false,
+      "message": "测试文件不存在或格式不正确",
+      "tokens_used": 560,
+      "duration_ms": 111,
+      "error": null
+    },
+    {
+      "task_id": "complex_01",
+      "run_id": 0,
+      "success": true,
+      "message": "复杂任务环境就绪",
+      "tokens_used": 1444,
+      "duration_ms": 106,
+      "error": null
+    },
+    {
+      "task_id": "complex_01",
+      "run_id": 1,
+      "success": true,
+      "message": "复杂任务环境就绪",
+      "tokens_used": 1965,
+      "duration_ms": 110,
+      "error": null
+    },
+    {
+      "task_id": "complex_01",
+      "run_id": 2,
+      "success": false,
+      "message": "模拟执行失败",
+      "tokens_used": 1254,
+      "duration_ms": 109,
+      "error": null
+    }
+  ]
+}

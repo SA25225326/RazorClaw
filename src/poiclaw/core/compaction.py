@@ -8,6 +8,10 @@
     - 摘要生成：调用 LLM 生成结构化摘要
     - 压缩执行：执行压缩并返回结果
 
+v2 格式支持：
+    - CompactionResult 包含 first_kept_entry_id（用于树形结构）
+    - 向后兼容：同时保留 first_kept_msg_idx
+
 设计参考：
     - pi-mono 的 Context Compaction 最佳实践
     - 短期完整对话 + 长期 LLM 摘要的分级记忆机制
@@ -41,6 +45,8 @@ class CompactionResult:
     summary_message: Message  # 摘要消息（用于注入上下文）
     kept_messages: list[Message]  # 保留的消息
     tokens_saved: int  # 节省的 token 数
+    # v2 格式支持：树形 Entry ID
+    first_kept_entry_id: str | None = None  # 第一个保留消息的 Entry ID
 
 
 # ============================================================================
@@ -377,6 +383,7 @@ async def compact(
     llm: LLMClient,
     settings: CompactionSettings,
     previous_summary: str | None = None,
+    entry_ids: list[str] | None = None,
 ) -> CompactionResult | None:
     """
     执行上下文压缩。
@@ -392,6 +399,7 @@ async def compact(
         llm: LLM 客户端
         settings: 压缩配置
         previous_summary: 之前的摘要（用于增量更新）
+        entry_ids: 消息对应的 Entry ID 列表（用于 v2 格式）
 
     Returns:
         CompactionResult 或 None（如果无需压缩）
@@ -429,7 +437,12 @@ async def compact(
     # 6. 计算压缩后的 token 数
     tokens_after = estimate_tokens(summary_message) + estimate_total_tokens(kept_messages)
 
-    # 7. 构建 CompactionEntry
+    # 7. 获取 first_kept_entry_id（v2 格式支持）
+    first_kept_entry_id: str | None = None
+    if entry_ids and cut_point < len(entry_ids):
+        first_kept_entry_id = entry_ids[cut_point]
+
+    # 8. 构建 CompactionEntry
     entry = CompactionEntry(
         id=str(uuid.uuid4()),
         timestamp=datetime.now().isoformat(),
@@ -444,6 +457,7 @@ async def compact(
         summary_message=summary_message,
         kept_messages=kept_messages,
         tokens_saved=tokens_before - tokens_after,
+        first_kept_entry_id=first_kept_entry_id,
     )
 
 

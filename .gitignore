@@ -54,3 +54,22 @@ NOTES.md
 
 # Node.js 测试文件
 test-feishu-ws.js
+
+# Node.js 依赖
+node_modules/
+
+# 临时文件
+*.tmp
+*.temp
+edit.txt
+output.txt
+
+# 评估临时文件
+.eval_tmp/
+
+# 复习资料（不上传）
+复习项目/
+agent (1).pdf
+
+# Claude Code 配置（本地）
+.claude/

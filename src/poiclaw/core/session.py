@@ -1,5 +1,5 @@
 """
-会话持久化管理 - 分离存储方案
+会话持久化管理 - 分离存储方案（支持 v1/v2 格式）
 
 存储结构：
     .poiclaw/
@@ -7,14 +7,22 @@
         ├── metadata/
         │   └── {uuid}.json     # SessionMetadata（轻量，用于列表展示）
         └── data/
-            └── {uuid}.json     # SessionData（完整消息列表）
+            ├── {uuid}.json     # SessionData（v1 格式，完整消息列表）
+            └── {timestamp}_{uuid}.jsonl  # SessionData（v2 格式，树形结构）
 
 核心特性：
     - 分离存储：metadata 用于快速列表展示，data 存储完整数据
+    - 双格式支持：v1（扁平 JSON）和 v2（树形 JSONL）
+    - 自动迁移：首次加载旧格式时自动迁移到新格式
     - 标题保护：title=None 时保留原标题
     - 内存保护：Agent 只在 messages 为空时加载历史
     - 异步 I/O：使用 asyncio.to_thread 包装文件操作
     - 容错机制：失败打印警告但不中断主程序
+
+v2 格式特性（树形结构）：
+    - 每条 Entry 有 id 和 parentId
+    - 支持分支/回溯（类似 Git）
+    - JSONL 格式存储（每行一个 Entry）
 """
 
 from __future__ import annotations
@@ -29,6 +37,22 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from poiclaw.llm import Message
+
+# v2 格式支持
+from poiclaw.core.session_tree import (
+    SessionEntry,
+    SessionHeader,
+    SessionMessageEntry,
+    CompactionEntry as CompactionEntryV2,
+    build_session_context,
+    load_jsonl_file,
+    parse_jsonl_entries,
+)
+from poiclaw.core.session_migration import (
+    detect_format,
+    migrate_v1_to_v2_async,
+    is_migration_needed,
+)
 
 
 # ============================================================================
@@ -452,33 +476,25 @@ class FileSessionManager:
         results = await asyncio.gather(metadata_task, data_task)
         return all(results)
 
-    async def load_session(self, session_id: str) -> list[Message] | None:
+    async def load_session(self, session_id: str, auto_migrate: bool = True) -> list[Message] | None:
         """
-        加载完整消息列表。
+        加载完整消息列表（支持 v1/v2 双格式）。
+
+        自动检测格式：
+            - v2: {timestamp}_{uuid}.jsonl 文件
+            - v1: {uuid}.json 文件
+
+        如果 auto_migrate=True，首次加载 v1 格式时会自动迁移到 v2。
 
         Args:
             session_id: 会话 ID
+            auto_migrate: 是否自动迁移旧格式
 
         Returns:
             消息列表，不存在返回 None
         """
-        data_dict = await self._read_json_async(self._get_data_path(session_id))
-        if data_dict is None:
-            return None
-
-        try:
-            data = SessionData.model_validate(data_dict)
-            messages: list[Message] = []
-            for msg_dict in data.messages:
-                try:
-                    messages.append(Message.model_validate(msg_dict))
-                except Exception as e:
-                    print(f"[SessionManager] 警告：消息解析失败: {e}")
-                    continue
-            return messages
-        except Exception as e:
-            print(f"[SessionManager] 警告：会话数据解析失败: {e}")
-            return None
+        messages, fmt = await self.load_session_with_format(session_id, auto_migrate)
+        return messages
 
     async def get_metadata(self, session_id: str) -> SessionMetadata | None:
         """
@@ -673,3 +689,280 @@ class FileSessionManager:
         data_dict["last_modified"] = datetime.now().isoformat()
 
         return await self._write_json_async(self._get_data_path(session_id), data_dict)
+
+    # ========================================================================
+    # v2 格式支持（JSONL 树形结构）
+    # ========================================================================
+
+    def _find_jsonl_file(self, session_id: str) -> Path | None:
+        """
+        查找会话对应的 JSONL 文件。
+
+        Args:
+            session_id: 会话 ID
+
+        Returns:
+            JSONL 文件路径，不存在返回 None
+        """
+        data_dir = self.base_path / self.DATA_DIR
+        if not data_dir.exists():
+            return None
+
+        # 查找匹配的 JSONL 文件
+        for jsonl_file in data_dir.glob(f"*_{session_id}.jsonl"):
+            return jsonl_file
+
+        return None
+
+    async def _load_session_v2(self, jsonl_path: Path) -> list[Message] | None:
+        """
+        加载 v2 格式会话（JSONL 树形结构）。
+
+        Args:
+            jsonl_path: JSONL 文件路径
+
+        Returns:
+            消息列表，失败返回 None
+        """
+        try:
+
+            def _load() -> list[Message] | None:
+                entries = load_jsonl_file(jsonl_path)
+                if not entries:
+                    return None
+
+                # 验证 Header
+                header = entries[0] if entries else None
+                if not header or header.get("type") != "session":
+                    return None
+
+                # 构建 Entry 列表和索引
+                session_entries: list[SessionEntry] = []
+                by_id: dict[str, SessionEntry] = {}
+
+                for e in entries[1:]:  # 跳过 header
+                    try:
+                        entry_type = e.get("type")
+                        if entry_type == "message":
+                            entry = SessionMessageEntry.model_validate(e)
+                        elif entry_type == "compaction":
+                            entry = CompactionEntryV2.model_validate(e)
+                        else:
+                            continue  # 跳过其他类型
+                        session_entries.append(entry)
+                        by_id[entry.id] = entry
+                    except Exception:
+                        continue
+
+                # 找到叶子节点（最后一个 entry）
+                leaf_id = session_entries[-1].id if session_entries else None
+
+                # 构建上下文
+                context = build_session_context(session_entries, leaf_id, by_id)
+                return context.messages
+
+            return await asyncio.to_thread(_load)
+
+        except Exception as e:
+            print(f"[SessionManager] 警告：加载 v2 格式失败 {jsonl_path}: {e}")
+            return None
+
+    async def _detect_and_load(self, session_id: str) -> tuple[list[Message] | None, str]:
+        """
+        检测格式并加载会话。
+
+        Args:
+            session_id: 会话 ID
+
+        Returns:
+            (消息列表, 格式字符串) - 格式为 "v1" 或 "v2"
+        """
+        # 先尝试 v2 格式
+        jsonl_path = self._find_jsonl_file(session_id)
+        if jsonl_path:
+            messages = await self._load_session_v2(jsonl_path)
+            if messages is not None:
+                return messages, "v2"
+
+        # 回退到 v1 格式
+        v1_path = self._get_data_path(session_id)
+        if v1_path.exists():
+            # 检测格式
+            fmt = await asyncio.to_thread(detect_format, v1_path)
+            if fmt == "v2_tree":
+                # 可能是误命名，尝试作为 JSONL 加载
+                messages = await self._load_session_v2(v1_path)
+                if messages is not None:
+                    return messages, "v2"
+            elif fmt == "v1_flat":
+                messages = await self._load_session_v1(v1_path)
+                if messages is not None:
+                    return messages, "v1"
+
+        return None, ""
+
+    async def _load_session_v1(self, json_path: Path) -> list[Message] | None:
+        """
+        加载 v1 格式会话（原有逻辑）。
+
+        Args:
+            json_path: JSON 文件路径
+
+        Returns:
+            消息列表，失败返回 None
+        """
+        data_dict = await self._read_json_async(json_path)
+        if data_dict is None:
+            return None
+
+        try:
+            data = SessionData.model_validate(data_dict)
+            messages: list[Message] = []
+            for msg_dict in data.messages:
+                try:
+                    messages.append(Message.model_validate(msg_dict))
+                except Exception as e:
+                    print(f"[SessionManager] 警告：消息解析失败: {e}")
+                    continue
+            return messages
+        except Exception as e:
+            print(f"[SessionManager] 警告：会话数据解析失败: {e}")
+            return None
+
+    async def load_session_with_format(
+        self, session_id: str, auto_migrate: bool = True
+    ) -> tuple[list[Message] | None, str]:
+        """
+        加载会话并返回格式信息。
+
+        Args:
+            session_id: 会话 ID
+            auto_migrate: 是否自动迁移旧格式
+
+        Returns:
+            (消息列表, 格式字符串) - 格式为 "v1" 或 "v2"
+        """
+        messages, fmt = await self._detect_and_load(session_id)
+
+        # 自动迁移
+        if auto_migrate and fmt == "v1" and messages is not None:
+            v1_path = self._get_data_path(session_id)
+            if v1_path.exists():
+                try:
+                    result = await migrate_v1_to_v2_async(v1_path, backup=True)
+                    if result.success:
+                        print(f"[SessionManager] 已迁移会话 {session_id} 到 v2 格式")
+                        # 删除旧的 metadata 文件中的 data 引用
+                        # metadata 仍然有效，用于列表展示
+                except Exception as e:
+                    print(f"[SessionManager] 警告：迁移失败: {e}")
+
+        return messages, fmt
+
+    # ========================================================================
+    # 树形操作 API（仅 v2 格式支持）
+    # ========================================================================
+
+    async def get_tree(self, session_id: str) -> dict | None:
+        """
+        获取会话树结构（仅 v2 格式）。
+
+        Args:
+            session_id: 会话 ID
+
+        Returns:
+            树结构字典，不支持返回 None
+        """
+        from poiclaw.core.session_tree import TreeSessionManager
+
+        jsonl_path = self._find_jsonl_file(session_id)
+        if not jsonl_path:
+            return None
+
+        try:
+
+            def _get_tree():
+                manager = TreeSessionManager.open(jsonl_path)
+                tree = manager.get_tree()
+                # 序列化树结构
+                return {
+                    "session_id": session_id,
+                    "leaf_id": manager.leaf_id,
+                    "roots": [self._serialize_tree_node(n) for n in tree],
+                }
+
+            return await asyncio.to_thread(_get_tree)
+
+        except Exception as e:
+            print(f"[SessionManager] 警告：获取树结构失败: {e}")
+            return None
+
+    def _serialize_tree_node(self, node) -> dict:
+        """序列化树节点"""
+        return {
+            "entry": node.entry.model_dump(mode="json"),
+            "label": node.label,
+            "children": [self._serialize_tree_node(c) for c in node.children],
+        }
+
+    async def get_branch(
+        self, session_id: str, entry_id: str | None = None
+    ) -> list[dict] | None:
+        """
+        获取从根到指定节点的路径（仅 v2 格式）。
+
+        Args:
+            session_id: 会话 ID
+            entry_id: 目标节点 ID（None 表示当前叶子）
+
+        Returns:
+            Entry 列表，不支持返回 None
+        """
+        from poiclaw.core.session_tree import TreeSessionManager
+
+        jsonl_path = self._find_jsonl_file(session_id)
+        if not jsonl_path:
+            return None
+
+        try:
+
+            def _get_branch():
+                manager = TreeSessionManager.open(jsonl_path)
+                entries = manager.get_branch(entry_id)
+                return [e.model_dump(mode="json") for e in entries]
+
+            return await asyncio.to_thread(_get_branch)
+
+        except Exception as e:
+            print(f"[SessionManager] 警告：获取分支路径失败: {e}")
+            return None
+
+    async def get_children(self, session_id: str, parent_id: str) -> list[dict] | None:
+        """
+        获取指定节点的子节点（仅 v2 格式）。
+
+        Args:
+            session_id: 会话 ID
+            parent_id: 父节点 ID
+
+        Returns:
+            子节点 Entry 列表，不支持返回 None
+        """
+        from poiclaw.core.session_tree import TreeSessionManager
+
+        jsonl_path = self._find_jsonl_file(session_id)
+        if not jsonl_path:
+            return None
+
+        try:
+
+            def _get_children():
+                manager = TreeSessionManager.open(jsonl_path)
+                entries = manager.get_children(parent_id)
+                return [e.model_dump(mode="json") for e in entries]
+
+            return await asyncio.to_thread(_get_children)
+
+        except Exception as e:
+            print(f"[SessionManager] 警告：获取子节点失败: {e}")
+            return None
